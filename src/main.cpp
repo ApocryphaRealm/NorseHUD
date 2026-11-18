@@ -107,6 +107,7 @@ namespace
     {
         UObject* actor = nullptr;
         UObject* comp = nullptr; // UnitComponent
+        int32_t actorIx = -1, compIx = -1; // checked with Alive() before each use: a unit can be destroyed between refreshes
         int maxHp = 0;
         bool enemy = false, boss = false, show = false;
         std::string name;
@@ -149,11 +150,14 @@ namespace
         std::vector<Unit> out;
         for (UObject* a : actors)
         {
+            if (!Alive(a, IndexOf(a))) continue; // destroyed, waiting for the garbage collector
             Unit u;
             u.actor = a;
+            u.actorIx = IndexOf(a);
             auto** uc = Reflect::Get().Prop<UObject*>(a, L"UnitComponent");
             u.comp = uc ? *uc : nullptr;
-            if (!u.comp) continue;
+            if (!u.comp || !Alive(u.comp, IndexOf(u.comp))) continue;
+            u.compIx = IndexOf(u.comp);
             Buf p;
             if (Reflect::Get().Call(u.comp, L"GetMaxHealth", p.b, 4, sizeof(p.b))) std::memcpy(&u.maxHp, p.b, 4);
             uint8_t team = 255;
@@ -264,6 +268,7 @@ namespace
         const Unit* boss = nullptr;
         for (const Unit& u : g_units)
         {
+            if (!Alive(u.actor, u.actorIx) || !Alive(u.comp, u.compIx)) continue;
             int hp = Health(u);
             if (u.boss && hp > 0 && u.show && !boss) boss = &u;
             if (!(g_cfg.Bars && u.show) && u.actor != target) continue;
