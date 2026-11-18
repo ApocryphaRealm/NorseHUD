@@ -113,7 +113,7 @@ namespace
         std::string name;
     };
     std::vector<Unit> g_units;
-    UObject* g_teamLib = nullptr;
+    UObject* g_teamLib = nullptr; // lives-forever (the team function library's Default__ object)
     double g_nextRefresh = 0;
 
     std::string UnitName(UObject* type)
