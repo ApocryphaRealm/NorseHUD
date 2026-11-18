@@ -1,0 +1,9 @@
+Reason: NorseHUD 0.1.0 draws unit health bars (red enemies, green party), the boss bar and the lock-on marker on the game's HUD canvas, in the right places (screenshot docs/shot-6-fixed.png).
+Batch B-20261117-215917-22c7, 2026-11-17 22:00-22:24 (Main Agent). Five launches - each failed step taught something:
+- 1: hooking the HUD's ReceiveDrawHUD event through UE4SS's ProcessEvent callback drew nothing - a Lua probe: bShowHUD true, ReceiveDrawHUD called 0 times in 2 s (Norse's HUD never fires it).
+- Offline: AHUD::DrawHUD identified as the one function reading the ReceiveDrawHUD name global (nal_strrefs.py, a global-reader scan, nal_callers.py: no direct callers = a virtual); added as Norse Address Library ID 10 (signature + seed).
+- 2: "AHUD::DrawHUD is vtable slot 251", hooked; bars drawn every frame (8,883 by frame 24,000), only once InFight (NorseConditions) - but far too high.
+- 3-4: lowering the bar height changed nothing - the setting had been edited while the game ran and Root Builder copied the deployed file back at game exit (past-mistakes entry). AHUD::Project also replaced by GameplayStatics::ProjectWorldToScreen with the HUD's PlayerOwner (the camera NorseRealtimeNative drives), as its own lock marker does.
+- 5: fBarZ=115 really applied: "bar check ... world (1610,-749,205) incl. +115 -> screen (385,401), canvas 1920x1080"; screenshot: bars just over the heads, green over the party, red over enemies, a half-grey bar over the enemy set 12 -> 6, the gold lock marker over NorseRealtimeNative's target, the boss bar "Frida Vargsdottir" at the top.
+- NorseRealtimeNative gained the exports NRN_LockTarget and NRN_Hero for it.
+- Not exercised: bars hiding at fMaxDistance, a boss taking damage, many units dying (bars should go with IsDead).
