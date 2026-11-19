@@ -34,6 +34,7 @@ namespace
         bool Bars = true, BossBar = true, LockMarker = true;
         std::wstring BarCondition = L"InFight AND NOT IsDead";
         float BarWidth = 80, BarHeight = 7, BarZ = 115, MaxDistance = 3500;
+        int LogLevel = 2; // uLogLevel: 0 trace, 1 debug, 2 info, 3 warn, 4 error, 6 off
         std::wstring LogDir;
     } g_cfg;
     fs::path g_mod;
@@ -65,6 +66,7 @@ namespace
             else if (k == L"fBarHeight") g_cfg.BarHeight = static_cast<float>(_wtof(v.c_str()));
             else if (k == L"fBarZ") g_cfg.BarZ = static_cast<float>(_wtof(v.c_str()));
             else if (k == L"fMaxDistance") g_cfg.MaxDistance = static_cast<float>(_wtof(v.c_str()));
+            else if (k == L"uLogLevel") g_cfg.LogLevel = _wtoi(v.c_str());
             else if (k == L"sLogDir") g_cfg.LogDir = v;
         }
     }
@@ -406,8 +408,8 @@ class NorseHUD : public RC::CppUserModBase
         g_errOut.vtbl = g_nopVtbl;
         g_mod = ModDir();
         LoadConfig();
-        Log::Get().Open((g_cfg.LogDir.empty() ? g_mod : fs::path(g_cfg.LogDir)) / "NorseHUD.log", 2);
-        Log::Get().Write(Level::Error, "NorseHUD v%s - bars %d, boss bar %d, lock marker %d", NH_VERSION, g_cfg.Bars, g_cfg.BossBar, g_cfg.LockMarker);
+        Log::Get().Open((g_cfg.LogDir.empty() ? g_mod : fs::path(g_cfg.LogDir)) / "NorseHUD.log", g_cfg.LogLevel);
+        Log::Get().Write(Level::Error, "NorseHUD v%s - log level %d - bars %d, boss bar %d, lock marker %d", NH_VERSION, g_cfg.LogLevel, g_cfg.Bars, g_cfg.BossBar, g_cfg.LockMarker);
     }
 
     auto on_unreal_init() -> void override
