@@ -29,3 +29,7 @@ the fight: its unit type's bIsBoss), `bLockMarker` (NorseRealtimeNative's `NRN_L
 rectangles), damage numbers, stamina / poise bars (they arrive with those modules), and hiding bars of units out of
 sight. Build: `xmake f -p windows -a x64 -m release --toolchain=msvc -y`, then `xmake` (needs `../NorsePatcher`,
 `../NorseManifest`, `../NorseAddressLibrary`; MinHook in `third_party/`).
+
+## Licence
+
+GPL-3.0-or-later (see LICENSE). MinHook (BSD 2-Clause), compiled into the DLL, keeps its own notice in THIRD-PARTY-NOTICES.txt.
