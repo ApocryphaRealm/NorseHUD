@@ -1,0 +1,18 @@
+Reason: with the hero's stamina drained below Hammer's cost the ability strip's LT+X box turns red and logs "no stamina", LT + X is refused, and the tint goes once stamina is back - SideMission_SeasideSkirmish, real pad (vpad).
+
+NorseHUD 1.0.0 (as recorded working, f86c) + NorseRealtimeNative 1.0.0 (test-kit command "nrn.ability stamina <v> [hold s]"), batch
+B-20261120-043651-cd3e, request 20261120-043646-norsehud-1-0-0-norserealtimenati-da41, one launch, map
+/Game/Norse/Maps/Missions/Side/SeasideSkirmish/SideMission_SeasideSkirmish, vpad plugged in after the game start.
+Logs: 4. plans\norse-controller-menus-20261119\tests\cd3e-NorseHUD.log / cd3e-NorseRealtimeNative.log; frames tests\shots\cd3e-*.png,
+cd3e-strip-combo.png (ready / drained / drained + LT+X / refilled).
+
+MEASURED
+- 04:39:32 "STRIP: LB -; X Hammer ready; ..." (fight running, full stamina); frame cd3e-ready: the plain icon.
+- 04:39:56 NRN "nrn.ability stamina: 10 of 100, no refill for 9.0 s"; NorseHUD "STRIP: ... X Hammer no stamina" the same tick; frame
+  cd3e-drained: the LT+X box red-tinted (pixel at the box 148,92,92 against 138,124,142 when ready), the stamina bar nearly empty.
+- 04:39:58 vpad LT + X: "STRIP: [LT held] ... X Hammer no stamina", NRN "STAMINA: 10 - not enough (30 needed)", no ABILITY line;
+  frame cd3e-drained-ltx: still red.
+- 04:40:05 "STRIP: ... X Hammer ready" once the refill passed 30; frame cd3e-refilled: no tint.
+
+NOT CHECKED
+- The tint on LT+LB / Y / A / B (the test save's Rekkr has only Hammer unlocked); the tint together with a running cooldown shutter.
