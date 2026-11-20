@@ -1,0 +1,31 @@
+Reason: the ability strip shows the hero's LT controls in a real-time fight on SideMission_SeasideSkirmish, LT + X from a real pad (vpad) fired Hammer and the strip counted its 12 s cooldown down to ready; the game's turn-based ability bar was collapsed while the strip showed and given back at the fight's end.
+
+NorseHUD 1.0.0 (ability strip) + NorseRealtimeNative 1.0.0 (NRN_GetAbilitySlots / NRN_GetStamina / NRN_LtHeld), batch B-20261120-032208-dc94,
+request 20261120-032204-norsehud-1-0-0-norserealtimenati-f86c, three launches, map /Game/Norse/Maps/Missions/Side/SeasideSkirmish/SideMission_SeasideSkirmish,
+vpad plugged in after each game start. Logs: 4. plans\norse-controller-menus-20261119\tests\dc94-run1..3-NorseHUD.log / -NorseRealtimeNative.log;
+frames tests\shots\dc94-*.png, dc94r2-*.png, dc94r3-*.png.
+
+MEASURED
+- Free roam (run 1): "STRIP: NorseRealtimeNative's NRN_GetAbilitySlots found" at 03:23:51; no "STRIP: shown" before the fight.
+- Fight start: "STRIP: shown at (768, 876), 5 slots of 64 px, canvas 1920x1080"; "Hammer - name 'Hammer', icon T_Ability_Rekkr_Hammer";
+  "the game's turn-based WBP_AbilityBar_C ... AbilityButtonContainer collapsed (was visibility 4; now 1)" - the game's ability bar WAS visible
+  in the real-time fight before this build; "STRIP: LB -; X Hammer ready; Y -; A -; B -" (this early Rekkr save has one unlocked ability).
+  Frame dc94-strip-ready.png: five boxes LT+LB..LT+B, the Hammer icon and name on LT+X, no game ability bar.
+- LT held (vpad seq l2 2.5 s): run 2 "STRIP: [LT held] LB -; X Hammer ready ..." at 03:32:10, released 03:32:13; frame dc94r2-lt-held.png gold outlines.
+- LT + X (vpad "press l2+square 150", 03:26:22): NorseRealtimeNative "ABILITY: Hammer (LT+X, effects route) ... cooldown 12.0 s"; NorseHUD
+  "X Hammer 12 s" 03:26:22.393, then 11, 10 ... 1 one second apart, "X Hammer ready" 03:26:34.357. Frames +1 s / +4 s / +8 s / +14 s
+  (dc94-countdown-strip.png): 11, 8, 3 on a shrinking dark shutter, then the bright icon.
+- Fight end (nrn.killhostiles): "STRIP: hidden (no real-time fight)", "1 turn-based bar widget(s) given back their visibility".
+- Run 1 fixes before run 2 (same batch): the LT frame was a filled rect (empty boxes looked solid gold) -> four edges; the [LT held] state
+  was not part of the change test -> logged; the strip overlapped NorseRealtimeNative's stamina bar (y 888) -> fStripBottom 140 -> 70
+  (boxes at y 946). Run 2 frame: outlines, no overlap.
+
+FOUND, NOT THE STRIP (control run 3)
+- After a fight in which Hammer was fired, the game's "HAMMER - Deals 2-4 Damage ... Delayed" tooltip stays on screen over the field
+  (dc94-after-fight2-small.png). Run 2 (strip on, no ability fired): no tooltip after the fight (dc94r2-combo.png). Run 3 (strip OFF by
+  nhud.set bAbilityStrip 0, Hammer fired by LT + X): the tooltip is there (dc94r3-combo.png). So it comes from NorseRealtimeNative's
+  Hammer firing (a delayed ability's game marker / tooltip), not from the strip - to-do for NorseRealtimeNative.
+
+NOT CHECKED
+- A hero with abilities on LT + LB / Y / A / B (the test save's Rekkr has Hammer only); the red "no stamina" tint (not driven to 0 stamina);
+  other resolutions than 1920x1080.

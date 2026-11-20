@@ -9,6 +9,8 @@
 // hooked; after it returns, the HUD's Canvas is still valid and NorseHUD calls the HUD's own Project / DrawRect /
 // DrawText - Unreal's canvas, nothing cooked, nothing in the paks changes.
 // What is drawn - NorseHUD.ini:
+//   the ability strip in real-time fights (2026-11-20): NorseRealtimeNative's LT + LB / X / Y / A / B abilities with their
+//   icons, cooldowns and stamina state (NRN_GetAbilitySlots); the game's turn-based ability bar is collapsed meanwhile;
 //   a health bar over every unit for which sBarCondition holds (NorseConditions; default "InFight AND NOT IsDead"),
 //   red for enemies, green for the player's side; a boss bar at the top for a living boss unit (its unit type's
 //   bIsBoss) in the fight; a marker over NorseRealtimeNative's lock-on target.
@@ -33,7 +35,8 @@ namespace
 {
     struct Config
     {
-        bool Bars = true, BossBar = true, LockMarker = true;
+        bool Bars = true, BossBar = true, LockMarker = true, AbilityStrip = true;
+        float StripSize = 64, StripBottom = 70;
         std::wstring BarCondition = L"InFight AND NOT IsDead";
         float BarWidth = 80, BarHeight = 7, BarZ = 115, MaxDistance = 3500;
         int LogLevel = 2; // uLogLevel: 0 trace, 1 debug, 2 info, 3 warn, 4 error, 6 off
@@ -62,6 +65,9 @@ namespace
         else if (k == L"fBarHeight") g_cfg.BarHeight = static_cast<float>(_wtof(v.c_str()));
         else if (k == L"fBarZ") g_cfg.BarZ = static_cast<float>(_wtof(v.c_str()));
         else if (k == L"fMaxDistance") g_cfg.MaxDistance = static_cast<float>(_wtof(v.c_str()));
+        else if (k == L"bAbilityStrip") g_cfg.AbilityStrip = _wtoi(v.c_str()) != 0;
+        else if (k == L"fStripSize") g_cfg.StripSize = std::clamp(static_cast<float>(_wtof(v.c_str())), 32.f, 128.f);
+        else if (k == L"fStripBottom") g_cfg.StripBottom = std::clamp(static_cast<float>(_wtof(v.c_str())), 0.f, 600.f);
         else if (k == L"uLogLevel") g_cfg.LogLevel = _wtoi(v.c_str());
         else if (k == L"sLogDir") g_cfg.LogDir = v;
         else return false;
@@ -94,6 +100,18 @@ namespace
     NcEvalFn g_ncEval = nullptr;
     int g_barCond = 0;
     NrnObjFn g_lockTarget = nullptr, g_hero = nullptr;
+    // the ability strip (2026-11-20): NorseRealtimeNative's five LT controls - NrnAbilitySlot is NRN's export layout (24 bytes)
+    struct NrnAbilitySlot
+    {
+        void* ability;
+        float cooldownLeft, cooldownTotal, staminaCost;
+        int32_t flags; // 1 an ability is on the control, 2 enough stamina, 4 off cooldown
+    };
+    static_assert(sizeof(NrnAbilitySlot) == 24, "NorseRealtimeNative's NrnAbilitySlot layout");
+    using NrnSlotsFn = int (*)(void*, int, int);
+    using NrnIntFn = int (*)();
+    NrnSlotsFn g_abilitySlots = nullptr;
+    NrnIntFn g_ltHeld = nullptr;
 
     void FindExports()
     {
@@ -111,6 +129,18 @@ namespace
         }
         if (!g_lockTarget) g_lockTarget = Export<NrnObjFn>(L"NorseRealtimeNative", "NRN_LockTarget");
         if (!g_hero) g_hero = Export<NrnObjFn>(L"NorseRealtimeNative", "NRN_Hero");
+        if (!g_abilitySlots)
+        {
+            g_abilitySlots = Export<NrnSlotsFn>(L"NorseRealtimeNative", "NRN_GetAbilitySlots");
+            g_ltHeld = Export<NrnIntFn>(L"NorseRealtimeNative", "NRN_LtHeld");
+            static bool told = false;
+            if (!told && g_hero) // NorseRealtimeNative is loaded: say once whether it has the strip's export
+            {
+                told = true;
+                if (g_abilitySlots) NRN_INFO("STRIP: NorseRealtimeNative's NRN_GetAbilitySlots found - the ability strip shows in real-time fights");
+                else NRN_WARN("STRIP: NorseRealtimeNative has no NRN_GetAbilitySlots (older than 2026-11-20) - no ability strip");
+            }
+        }
     }
 
     // ------------------------------------------------------------------ units (refreshed once a second)
@@ -253,6 +283,210 @@ namespace
         Rect(hud, fill, cx - w / 2, y, w * frac, h);
     }
 
+    // ------------------------------------------------------------------ the ability strip (2026-11-20)
+    // Controller-menus build list item 4: in a real-time fight (NorseRealtimeNative possesses the hero) a row of five boxes
+    // at the bottom centre - LT + LB (war cry), LT + X / Y / A / B - each with the ability's own icon and name from its data
+    // asset (UInfoAsset Icon / Name), a dark shutter falling as the cooldown runs out with the seconds left, red when there
+    // is not enough stamina, a gold frame while LT is held. The game's turn-based ability bar (WBP_AbilityBar / WBP_APBar)
+    // is collapsed while the strip shows and given back its visibility when the fight ends.
+    struct StripInfo
+    {
+        UObject* icon = nullptr; // alive-checked via iconIx before each draw
+        int32_t iconIx = -1;
+        std::wstring name;
+    };
+    std::map<void*, StripInfo> g_stripInfo; // key-only: ability data asset -> its icon and name (cleared at each map load)
+    bool g_stripShown = false, g_texOk = true;
+    std::string g_stripLast; // the state last logged
+    double g_stripNextLog = 0, g_barNextCheck = 0;
+    struct HiddenBar
+    {
+        UObject* w; // alive-checked via ix before the visibility is given back
+        int32_t ix;
+        uint8_t vis;
+    };
+    std::vector<HiddenBar> g_hiddenBars;
+
+    const StripInfo& InfoOf(void* ab)
+    {
+        auto it = g_stripInfo.find(ab);
+        if (it != g_stripInfo.end()) return it->second;
+        StripInfo s;
+        UObject* a = static_cast<UObject*>(ab);
+        if (auto** ic = Reflect::Get().Prop<UObject*>(a, L"Icon"); ic && *ic)
+        {
+            s.icon = *ic;
+            s.iconIx = IndexOf(*ic);
+        }
+        auto* cls = reinterpret_cast<UStruct*>(Reflect::Get().ClassOf(a));
+        FProperty* p = cls ? FindProp(cls, L"Name") : nullptr;
+        std::wstring t = p ? norse::Export(p, reinterpret_cast<uint8_t*>(a) + p->GetOffset_Internal(), a) : L"";
+        size_t b = t.rfind(L'"'), q = b == std::wstring::npos ? b : t.rfind(L'"', b - 1);
+        if (q != std::wstring::npos && b > q) s.name = t.substr(q + 1, b - q - 1);
+        if (s.name.empty()) s.name = ShortName(a->GetFullName(nullptr));
+        NRN_INFO("STRIP: %s - name '%s', icon %s", Narrow(ShortName(a->GetFullName(nullptr))).c_str(), Narrow(s.name).c_str(),
+                 s.icon ? Narrow(ShortName(s.icon->GetFullName(nullptr))).c_str() : "none");
+        return g_stripInfo.emplace(ab, s).first->second;
+    }
+
+    // AHUD::DrawTexture(Texture @0, ScreenX @8, Y @12, W @16, H @20, U @24, V @28, UWidth @32, VHeight @36, FLinearColor Tint @40,
+    // EBlendMode @56, Scale @60, bScalePosition @64, Rotation @68, FVector2D RotPivot @72) = 88 bytes
+    void Tex(UObject* hud, UObject* tex, float x, float y, float w, float h, const Color& tint)
+    {
+        if (!g_texOk || !tex) return;
+        Buf p;
+        std::memcpy(p.b, &tex, 8);
+        float v[8] = {x, y, w, h, 0, 0, 1, 1};
+        std::memcpy(p.b + 8, v, 32);
+        std::memcpy(p.b + 40, &tint, 16);
+        p.b[56] = 2; // BLEND_Translucent
+        float one = 1;
+        std::memcpy(p.b + 60, &one, 4);
+        if (!Reflect::Get().Call(hud, L"DrawTexture", p.b, 88, sizeof(p.b)))
+        {
+            g_texOk = false;
+            NRN_WARN("STRIP: AHUD::DrawTexture refused (parameters %u bytes, 88 expected) - the strip shows names without icons",
+                     Reflect::Get().ParmsSizeOf(hud, L"DrawTexture"));
+        }
+    }
+
+    uint8_t Visibility(UObject* w)
+    {
+        Buf p;
+        return Reflect::Get().Call(w, L"GetVisibility", p.b, 1, sizeof(p.b)) ? p.b[0] : 255;
+    }
+
+    void SetVisibility(UObject* w, uint8_t v)
+    {
+        Buf p;
+        p.b[0] = v;
+        Reflect::Get().Call(w, L"SetVisibility", p.b, 1, sizeof(p.b));
+    }
+
+    // the game's turn-based ability bar and AP bar: collapsed while the strip shows (checked every 2 s - a fight's HUD may
+    // build them later), each one's own visibility given back when the strip goes
+    void TurnBarsOff(double now)
+    {
+        if (now < g_barNextCheck) return;
+        g_barNextCheck = now + 2.0;
+        for (const wchar_t* cls : {L"WBP_AbilityBar_C", L"WBP_APBar_C"})
+        {
+            std::vector<UObject*> ws;
+            try
+            {
+                RC::Unreal::UObjectGlobals::FindAllOf(cls, ws);
+            }
+            catch (...)
+            {
+            }
+            int seen = 0, hidden = 0;
+            for (UObject* w : ws)
+            {
+                if (!Alive(w, IndexOf(w)) || Name(w).find("Default__") != std::string::npos) continue;
+                ++seen;
+                uint8_t v = Visibility(w);
+                if (v == 255 || v == 1 || v == 2) continue; // unreadable, or already collapsed / hidden
+                g_hiddenBars.push_back({w, IndexOf(w), v});
+                SetVisibility(w, 1);
+                ++hidden;
+                NRN_INFO("STRIP: the game's turn-based %s %s collapsed (was visibility %u; now %u)", Narrow(cls).c_str(), Name(w).c_str(), v,
+                         Visibility(w));
+            }
+            static std::map<std::wstring, int> lastSeen;
+            if (lastSeen[cls] != seen)
+            {
+                lastSeen[cls] = seen;
+                NRN_INFO("STRIP: %d %s widget(s) in the world, %d visible ones collapsed now", seen, Narrow(cls).c_str(), hidden);
+            }
+        }
+    }
+
+    void TurnBarsBack()
+    {
+        int n = 0;
+        for (const HiddenBar& h : g_hiddenBars)
+            if (Alive(h.w, h.ix))
+            {
+                SetVisibility(h.w, h.vis);
+                ++n;
+            }
+        if (!g_hiddenBars.empty()) NRN_INFO("STRIP: %d turn-based bar widget(s) given back their visibility", n);
+        g_hiddenBars.clear();
+    }
+
+    void DrawStrip(UObject* hud, int32_t sx, int32_t sy, double now)
+    {
+        NrnAbilitySlot s[5]{};
+        int n = g_cfg.AbilityStrip && g_abilitySlots && sx > 0 ? g_abilitySlots(s, 5, static_cast<int>(sizeof(NrnAbilitySlot))) : 0;
+        if (n <= 0)
+        {
+            if (g_stripShown)
+            {
+                g_stripShown = false;
+                g_stripLast.clear();
+                NRN_INFO("STRIP: hidden (no real-time fight)");
+                TurnBarsBack();
+            }
+            return;
+        }
+        static const wchar_t* kBtn[5] = {L"LB", L"X", L"Y", L"A", L"B"};
+        static const Color kBtnCol[5] = {{0.8f, 0.8f, 0.8f, 1}, {0.25f, 0.55f, 1, 1}, {1, 0.85f, 0.2f, 1}, {0.3f, 0.85f, 0.3f, 1}, {0.95f, 0.3f, 0.25f, 1}};
+        bool lt = g_ltHeld && g_ltHeld() != 0;
+        float S = g_cfg.StripSize, gap = S * 0.25f, total = n * S + (n - 1) * gap;
+        float x0 = sx / 2.f - total / 2, y = sy - g_cfg.StripBottom - S;
+        std::string state = lt ? "[LT held] " : "";
+        for (int i = 0; i < n; ++i)
+        {
+            float x = x0 + i * (S + gap);
+            const NrnAbilitySlot& a = s[i];
+            bool has = (a.flags & 1) != 0, stam = (a.flags & 2) != 0, ready = (a.flags & 4) != 0;
+            const Color fc = lt ? Color{0.95f, 0.75f, 0.2f, 0.95f} : Color{0, 0, 0, 0.7f}; // the frame: four edges, gold while LT is held
+            float t = lt ? 3.f : 2.f;
+            Rect(hud, fc, x - t, y - t, S + 2 * t, t);
+            Rect(hud, fc, x - t, y + S, S + 2 * t, t);
+            Rect(hud, fc, x - t, y, t, S);
+            Rect(hud, fc, x + S, y, t, S);
+            Rect(hud, {0.05f, 0.05f, 0.05f, has ? 0.75f : 0.35f}, x, y, S, S);
+            Text(hud, std::wstring(L"LT+") + kBtn[i], kBtnCol[i], x + 3, y - 20, 1.0f);
+            if (!has)
+            {
+                state += Narrow(kBtn[i]) + " -; ";
+                continue;
+            }
+            const StripInfo& info = InfoOf(a.ability);
+            if (info.icon && Alive(info.icon, info.iconIx))
+                Tex(hud, info.icon, x + 4, y + 4, S - 8, S - 8, ready && stam ? Color{1, 1, 1, 1} : Color{0.45f, 0.45f, 0.45f, 1});
+            if (!ready && a.cooldownTotal > 0) // the shutter: the part still cooling, from the top
+            {
+                float frac = std::clamp(a.cooldownLeft / a.cooldownTotal, 0.f, 1.f);
+                Rect(hud, {0, 0, 0, 0.65f}, x, y, S, S * frac);
+                wchar_t sec[16];
+                swprintf(sec, 16, L"%.0f", std::ceil(a.cooldownLeft));
+                Text(hud, sec, {1, 1, 1, 1}, x + S / 2 - 8 * std::wcslen(sec) / 2.f, y + S / 2 - 10, 1.3f);
+            }
+            if (!stam) Rect(hud, {0.8f, 0.1f, 0.05f, 0.35f}, x, y, S, S); // not enough stamina now
+            std::wstring nm = info.name.size() > 12 ? info.name.substr(0, 11) + L"." : info.name;
+            Text(hud, nm, {0.95f, 0.9f, 0.8f, has ? 1.f : 0.5f}, x + S / 2 - 3.5f * nm.size(), y + S + 4, 0.9f);
+            char buf[96];
+            snprintf(buf, sizeof(buf), "%s %s %s; ", Narrow(kBtn[i]).c_str(), Narrow(info.name).c_str(),
+                     !ready ? (std::to_string(static_cast<int>(std::ceil(a.cooldownLeft))) + " s").c_str() : stam ? "ready" : "no stamina");
+            state += buf;
+        }
+        if (!g_stripShown)
+        {
+            g_stripShown = true;
+            NRN_INFO("STRIP: shown at (%.0f, %.0f), %d slots of %.0f px, canvas %dx%d", x0, y, n, S, sx, sy);
+        }
+        TurnBarsOff(now);
+        // log each change of state; while a cooldown runs this is once a second (the countdown, for the test)
+        if (state != g_stripLast && now >= g_stripNextLog)
+        {
+            g_stripLast = state;
+            g_stripNextLog = now + 0.5;
+            NRN_INFO("STRIP: %s", state.c_str());
+        }
+    }
+
     uint64_t g_frames = 0, g_drawn = 0;
 
     void Draw(UObject* hud)
@@ -319,6 +553,7 @@ namespace
             Bar(hud, sx / 2.f, 40.f, w, 12.f, static_cast<float>(Health(*boss)) / std::max(1, boss->maxHp), {0.7f, 0.05f, 0.05f, 0.95f});
             Text(hud, Widen(boss->name), {0.95f, 0.9f, 0.8f, 1}, sx / 2.f - w / 2, 18.f, 1.2f);
         }
+        DrawStrip(hud, sx, sy, now);
         if (g_frames == 1 || g_frames % 600 == 0)
             NRN_INFO("drawing: frame %llu, %zu unit(s) known, %llu bar(s) drawn so far%s", static_cast<unsigned long long>(g_frames), g_units.size(),
                      static_cast<unsigned long long>(g_drawn), g_drawOk ? "" : " - DrawRect calls FAILED (see the warnings)");
@@ -426,6 +661,9 @@ namespace
                  g_cfg.Bars, g_cfg.BossBar, g_cfg.LockMarker, g_cfg.BarWidth, g_cfg.BarHeight, g_cfg.BarZ, g_cfg.MaxDistance, g_cfg.LogLevel);
         NRN_INFO("  sBarCondition '%s': %s", Narrow(g_cfg.BarCondition).c_str(),
                  g_barCond ? "compiled (NorseConditions)" : g_ncEval ? "did not compile - every living unit shown" : "NorseConditions not found yet - every living unit shown");
+        NRN_INFO("  ability strip: bAbilityStrip %d, fStripSize %.0f, fStripBottom %.0f, NRN_GetAbilitySlots %s, %s; %zu turn-based bar widget(s) collapsed",
+                 g_cfg.AbilityStrip, g_cfg.StripSize, g_cfg.StripBottom, g_abilitySlots ? "found" : "not found", g_stripShown ? "shown" : "not shown",
+                 g_hiddenBars.size());
         NRN_INFO("  lock-on target %s, hero %s (NorseRealtimeNative)", g_lockTarget ? "export found" : "export not found", g_hero ? "export found" : "export not found");
         NRN_INFO("  units: %zu known, %d with a bar shown, %d enemy, %d boss; frames %llu, bars drawn %llu%s", g_units.size(), shown, enemies, bosses,
                  static_cast<unsigned long long>(g_frames), static_cast<unsigned long long>(g_drawn), g_drawOk ? "" : " - DrawRect calls FAILED");
@@ -455,10 +693,11 @@ namespace
             size_t sp = arg.find(L' ');
             std::wstring key = Trim(arg.substr(0, sp)), value = sp == std::wstring::npos ? L"" : Trim(arg.substr(sp + 1));
             std::wstring match;
-            for (const wchar_t* k : {L"bBars", L"bBossBar", L"bLockMarker", L"sBarCondition", L"fBarWidth", L"fBarHeight", L"fBarZ", L"fMaxDistance", L"uLogLevel"})
+            for (const wchar_t* k : {L"bBars", L"bBossBar", L"bLockMarker", L"sBarCondition", L"fBarWidth", L"fBarHeight", L"fBarZ", L"fMaxDistance", L"bAbilityStrip",
+                                       L"fStripSize", L"fStripBottom", L"uLogLevel"})
                 if (_wcsicmp(k, key.c_str()) == 0) match = k;
             if (match.empty() || value.empty())
-                NRN_WARN("nhud.set: use nhud.set <key> <value>, key one of bBars bBossBar bLockMarker sBarCondition fBarWidth fBarHeight fBarZ fMaxDistance uLogLevel");
+                NRN_WARN("nhud.set: use nhud.set <key> <value>, key one of bBars bBossBar bLockMarker sBarCondition fBarWidth fBarHeight fBarZ fMaxDistance bAbilityStrip fStripSize fStripBottom uLogLevel");
             else
             {
                 ApplyKey(match, value);
@@ -496,6 +735,10 @@ class NorseHUD : public RC::CppUserModBase
             RC::Unreal::Hook::RegisterInitGameStatePostCallback([](RC::Unreal::AGameModeBase*) {
                 g_units.clear();
                 g_nextRefresh = 0;
+                g_stripInfo.clear(); // a new map: ability assets and icons may be other objects
+                g_hiddenBars.clear();
+                g_stripShown = false;
+                g_stripLast.clear();
                 HookHud();
             });
             RC::Unreal::Hook::RegisterEngineTickPreCallback([](RC::Unreal::UEngine*, float) {
