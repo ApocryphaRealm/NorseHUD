@@ -23,6 +23,10 @@ unit, its location, one projection and two DrawRects.
 (height above the unit's middle, default 115 cm - just over the head), `fMaxDistance`, `bBossBar` (a living boss in
 the fight: its unit type's bIsBoss), `bLockMarker` (NorseRealtimeNative's `NRN_LockTarget` export).
 
+## Console
+
+In the UE4SS console: `nhud.status` writes the settings, the HUD hook and unit counts to NorseHUD.log; `nhud.set <key> <value>` changes one NorseHUD.ini key for this session (the file is not changed); `nhud.reload` reads NorseHUD.ini again.
+
 ## Status
 
 0.1.0 tested in game (TEST-RESULT-0.1.0.txt, five launches). Not yet: the game's own UI style (the bars are plain

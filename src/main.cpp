@@ -12,6 +12,8 @@
 //   a health bar over every unit for which sBarCondition holds (NorseConditions; default "InFight AND NOT IsDead"),
 //   red for enemies, green for the player's side; a boss bar at the top for a living boss unit (its unit type's
 //   bIsBoss) in the fight; a marker over NorseRealtimeNative's lock-on target.
+// Console: nhud.status (settings, hook and unit counts to the log), nhud.set <key> <value> (one NorseHUD.ini key for this
+// session), nhud.reload (reads NorseHUD.ini again).
 // Cost: the unit list, team, boss flag, name and the condition are refreshed once a second; per frame, per shown unit:
 // its location, one Project and two or three DrawRects.
 #include "NorseReflect.hpp"
@@ -49,6 +51,23 @@ namespace
         return fs::path(buf).parent_path().parent_path();
     }
 
+    // One INI key; false when the key is not one of NorseHUD's. Shared by LoadConfig and nhud.set.
+    bool ApplyKey(const std::wstring& k, const std::wstring& v)
+    {
+        if (k == L"bBars") g_cfg.Bars = _wtoi(v.c_str()) != 0;
+        else if (k == L"bBossBar") g_cfg.BossBar = _wtoi(v.c_str()) != 0;
+        else if (k == L"bLockMarker") g_cfg.LockMarker = _wtoi(v.c_str()) != 0;
+        else if (k == L"sBarCondition") g_cfg.BarCondition = v;
+        else if (k == L"fBarWidth") g_cfg.BarWidth = static_cast<float>(_wtof(v.c_str()));
+        else if (k == L"fBarHeight") g_cfg.BarHeight = static_cast<float>(_wtof(v.c_str()));
+        else if (k == L"fBarZ") g_cfg.BarZ = static_cast<float>(_wtof(v.c_str()));
+        else if (k == L"fMaxDistance") g_cfg.MaxDistance = static_cast<float>(_wtof(v.c_str()));
+        else if (k == L"uLogLevel") g_cfg.LogLevel = _wtoi(v.c_str());
+        else if (k == L"sLogDir") g_cfg.LogDir = v;
+        else return false;
+        return true;
+    }
+
     void LoadConfig()
     {
         g_cfg = Config{};
@@ -57,17 +76,7 @@ namespace
             std::wstring l = Trim(StripComment(raw));
             size_t eq = l.find(L'=');
             if (l.empty() || l[0] == L'[' || eq == std::wstring::npos) continue;
-            std::wstring k = Trim(l.substr(0, eq)), v = Trim(l.substr(eq + 1));
-            if (k == L"bBars") g_cfg.Bars = _wtoi(v.c_str()) != 0;
-            else if (k == L"bBossBar") g_cfg.BossBar = _wtoi(v.c_str()) != 0;
-            else if (k == L"bLockMarker") g_cfg.LockMarker = _wtoi(v.c_str()) != 0;
-            else if (k == L"sBarCondition") g_cfg.BarCondition = v;
-            else if (k == L"fBarWidth") g_cfg.BarWidth = static_cast<float>(_wtof(v.c_str()));
-            else if (k == L"fBarHeight") g_cfg.BarHeight = static_cast<float>(_wtof(v.c_str()));
-            else if (k == L"fBarZ") g_cfg.BarZ = static_cast<float>(_wtof(v.c_str()));
-            else if (k == L"fMaxDistance") g_cfg.MaxDistance = static_cast<float>(_wtof(v.c_str()));
-            else if (k == L"uLogLevel") g_cfg.LogLevel = _wtoi(v.c_str());
-            else if (k == L"sLogDir") g_cfg.LogDir = v;
+            ApplyKey(Trim(l.substr(0, eq)), Trim(l.substr(eq + 1)));
         }
     }
 
@@ -393,6 +402,74 @@ namespace
                  g_drawSlot, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(fn) - mod), Reflect::Get().ParmsSizeOf(hud, L"DrawRect"),
                  Reflect::Get().ParmsSizeOf(hud, L"DrawText"), Reflect::Get().ParmsSizeOf(hud, L"Project"));
     }
+
+    // ------------------------------------------------------------------ console: nhud.status | nhud.set <key> <value> | nhud.reload
+    void ResetCondition() // sBarCondition changed: compile it again on the next refresh
+    {
+        g_barCond = 0;
+        g_ncEval = nullptr;
+        g_nextRefresh = 0;
+    }
+
+    void Status()
+    {
+        int shown = 0, bosses = 0, enemies = 0;
+        for (const Unit& u : g_units)
+        {
+            shown += u.show;
+            bosses += u.boss;
+            enemies += u.enemy;
+        }
+        NRN_INFO("nhud.status: v%s, drawing %s, DrawHUD slot %zu, %zu HUD class(es) hooked", NH_VERSION,
+                 g_hudOff ? "OFF (see the errors above)" : "on", g_drawSlot, g_drawOriginals.size());
+        NRN_INFO("  bBars %d, bBossBar %d, bLockMarker %d, fBarWidth %.0f, fBarHeight %.0f, fBarZ %.0f, fMaxDistance %.0f, uLogLevel %d",
+                 g_cfg.Bars, g_cfg.BossBar, g_cfg.LockMarker, g_cfg.BarWidth, g_cfg.BarHeight, g_cfg.BarZ, g_cfg.MaxDistance, g_cfg.LogLevel);
+        NRN_INFO("  sBarCondition '%s': %s", Narrow(g_cfg.BarCondition).c_str(),
+                 g_barCond ? "compiled (NorseConditions)" : g_ncEval ? "did not compile - every living unit shown" : "NorseConditions not found yet - every living unit shown");
+        NRN_INFO("  lock-on target %s, hero %s (NorseRealtimeNative)", g_lockTarget ? "export found" : "export not found", g_hero ? "export found" : "export not found");
+        NRN_INFO("  units: %zu known, %d with a bar shown, %d enemy, %d boss; frames %llu, bars drawn %llu%s", g_units.size(), shown, enemies, bosses,
+                 static_cast<unsigned long long>(g_frames), static_cast<unsigned long long>(g_drawn), g_drawOk ? "" : " - DrawRect calls FAILED");
+    }
+
+    bool RunCommand(const std::wstring& c)
+    {
+        std::wstring cmd = Trim(c), arg;
+        if (size_t sp = cmd.find(L' '); sp != std::wstring::npos)
+        {
+            arg = Trim(cmd.substr(sp + 1));
+            cmd = cmd.substr(0, sp);
+        }
+        cmd = Lower(cmd);
+        NRN_INFO("command: %s %s", Narrow(cmd).c_str(), Narrow(arg).c_str());
+        if (cmd == L"nhud.status") Status();
+        else if (cmd == L"nhud.reload")
+        {
+            LoadConfig();
+            Log::Get().SetLevel(g_cfg.LogLevel);
+            ResetCondition();
+            NRN_INFO("nhud.reload: NorseHUD.ini read again (sLogDir takes effect at the next start)");
+            Status();
+        }
+        else if (cmd == L"nhud.set" && !arg.empty())
+        {
+            size_t sp = arg.find(L' ');
+            std::wstring key = Trim(arg.substr(0, sp)), value = sp == std::wstring::npos ? L"" : Trim(arg.substr(sp + 1));
+            std::wstring match;
+            for (const wchar_t* k : {L"bBars", L"bBossBar", L"bLockMarker", L"sBarCondition", L"fBarWidth", L"fBarHeight", L"fBarZ", L"fMaxDistance", L"uLogLevel"})
+                if (_wcsicmp(k, key.c_str()) == 0) match = k;
+            if (match.empty() || value.empty())
+                NRN_WARN("nhud.set: use nhud.set <key> <value>, key one of bBars bBossBar bLockMarker sBarCondition fBarWidth fBarHeight fBarZ fMaxDistance uLogLevel");
+            else
+            {
+                ApplyKey(match, value);
+                if (match == L"uLogLevel") Log::Get().SetLevel(g_cfg.LogLevel);
+                if (match == L"sBarCondition") ResetCondition();
+                NRN_INFO("nhud.set %s = %s (this session only; NorseHUD.ini is not changed)", Narrow(match).c_str(), Narrow(value).c_str());
+            }
+        }
+        else NRN_WARN("unknown command - nhud.status | nhud.set <key> <value> | nhud.reload");
+        return true;
+    }
 } // namespace
 
 class NorseHUD : public RC::CppUserModBase
@@ -425,6 +502,17 @@ class NorseHUD : public RC::CppUserModBase
                 static int n = 0;
                 if (++n % 120 == 0) HookHud(); // a HUD class first seen mid-map (cheap: one FindFirstOf every ~2 s)
             });
+            RC::Unreal::Hook::RegisterProcessConsoleExecCallback(
+                    [](UObject*, const wchar_t* cmd, RC::Unreal::FOutputDevice&, UObject*) -> bool {
+                        if (!cmd || _wcsnicmp(cmd, L"nhud.", 5) != 0) return false;
+                        static ULONGLONG last = 0;
+                        static std::wstring lastCmd;
+                        ULONGLONG now = GetTickCount64();
+                        if (lastCmd == cmd && now - last < 250) return true; // the console delivers a line more than once
+                        last = now;
+                        lastCmd = cmd;
+                        return RunCommand(cmd);
+                    });
             NRN_INFO("callbacks registered");
         }
         catch (const std::exception& e)

@@ -3,6 +3,7 @@
 ## 1.0.0 - 2026-11-18 - working
 
 ### Added
+- Console commands: nhud.status (settings, the HUD hook and unit counts to the log), nhud.set <key> <value> (one NorseHUD.ini key for this session), nhud.reload (reads NorseHUD.ini again). Added after 1.0.0 was recorded working; the 1.0.0 test package is rebuilt and needs a new load check.
 - uLogLevel in NorseHUD.ini: 2 = info (the default), 0 = everything for a bug report.
 - First release. It contains everything built and tested in 0.1.0, listed here and kept as history below:
 - Health bars over units (sBarCondition, NorseConditions), a boss bar, a marker over the lock-on target - drawn on the HUD canvas after AHUD::DrawHUD (NAL ID 10, vtable slot found at run time).
