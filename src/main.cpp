@@ -778,6 +778,13 @@ namespace
         }
     }
 
+    // 2026-11-22: other mods draw on the same canvas through NHUD_AddDrawCallback (NorseQuickLoot's loot panel); each is
+    // called after NorseHUD's own drawing, on the game thread, with the HUD and the canvas size, and calls the HUD's own
+    // DrawRect / DrawText / DrawTexture itself. One hook on DrawHUD for every mod - a second hook on the same function
+    // from another DLL is what the address library refuses (past-mistakes 15279).
+    using DrawCb = void (*)(void* hud, int sizeX, int sizeY);
+    std::vector<DrawCb> g_drawCbs;
+
     void Draw(UObject* hud)
     {
         int32_t sx = 0, sy = 0;
@@ -845,6 +852,7 @@ namespace
         }
         DrawStrip(hud, sx, sy, now);
         DrawCompass(hud, sx);
+        for (DrawCb cb : g_drawCbs) cb(hud, sx, sy); // each guards itself (NorseQuickLoot: try/catch around its panel)
         if (g_frames == 1 || g_frames % 600 == 0)
             NRN_INFO("drawing: frame %llu, %zu unit(s) known, %llu bar(s) drawn so far%s", static_cast<unsigned long long>(g_frames), g_units.size(),
                      static_cast<unsigned long long>(g_drawn), g_drawOk ? "" : " - DrawRect calls FAILED (see the warnings)");
@@ -1055,6 +1063,19 @@ class NorseHUD : public RC::CppUserModBase
         }
     }
 };
+
+// 2026-11-22: draw on NorseHUD's canvas - fn(hud, canvas width, canvas height) runs every HUD frame after NorseHUD's own
+// drawing. Returns 1 when added (or already there), 0 for a null function. Call it on the game thread.
+extern "C" __declspec(dllexport) int NHUD_AddDrawCallback(void (*fn)(void* hud, int sizeX, int sizeY))
+{
+    if (!fn) return 0;
+    if (std::find(g_drawCbs.begin(), g_drawCbs.end(), fn) == g_drawCbs.end())
+    {
+        g_drawCbs.push_back(fn);
+        NRN_INFO("draw callback added (%zu in all) - another mod draws on the HUD canvas", g_drawCbs.size());
+    }
+    return 1;
+}
 
 extern "C" __declspec(dllexport) RC::CppUserModBase* start_mod()
 {
