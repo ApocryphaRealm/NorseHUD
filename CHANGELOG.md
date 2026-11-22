@@ -12,6 +12,7 @@
 - main.dll carries a Windows version resource (file and product version 1.0.0, shown in its Properties > Details).
 
 ### Fixed
+- Enemy health bars no longer float in empty places before a fight: a unit the game keeps hidden or that has no team yet (a mission's enemies waiting to spawn) gets no bar until it is spawned. The log counts the units skipped.
 - A crash after a map change or when a unit was destroyed: the unit list (refreshed once a second) kept pointers to destroyed units and read their health. Each unit is now checked against the object array before every read (found by NorseEncounters 0.1.0 removing a unit, 2026-11-17).
 
 ## 0.1.0 - 2026-11-17 (tested in game: TEST-RESULT-0.1.0.txt)

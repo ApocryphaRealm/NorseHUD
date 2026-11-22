@@ -189,9 +189,17 @@ namespace
         if (!g_teamLib)
             g_teamLib = RC::Unreal::UObjectGlobals::StaticFindObject_InternalSlow(nullptr, nullptr, L"/Script/Norse.Default__TeamIDLibrary", false);
         std::vector<Unit> out;
+        int noTeam = 0, hidden = 0;
         for (UObject* a : actors)
         {
             if (!Alive(a, IndexOf(a))) continue; // destroyed, waiting for the garbage collector
+            // not in the world yet: a mission's enemies wait as hidden units with no team until their fight spawns them
+            // (SeasideSkirmish 2026-11-22: 24 of them drew red bars in empty forest). No bar for either.
+            if (FieldTrue(a, L"bHidden"))
+            {
+                ++hidden;
+                continue;
+            }
             Unit u;
             u.actor = a;
             u.actorIx = IndexOf(a);
@@ -202,7 +210,12 @@ namespace
             Buf p;
             if (Reflect::Get().Call(u.comp, L"GetMaxHealth", p.b, 4, sizeof(p.b))) std::memcpy(&u.maxHp, p.b, 4);
             uint8_t team = 255;
-            if (g_teamLib) GetTeamIDSafe(g_teamLib, a, team);
+            bool teamRead = g_teamLib && GetTeamIDSafe(g_teamLib, a, team);
+            if (teamRead && team == 255) // no team: not in any fight yet (the combat mod counts these out too)
+            {
+                ++noTeam;
+                continue;
+            }
             u.enemy = team != 0;
             auto** type = Reflect::Get().Prop<UObject*>(u.comp, L"CombatUnit");
             if (type && *type)
@@ -212,6 +225,14 @@ namespace
             }
             u.show = g_barCond && g_ncEval ? g_ncEval(g_barCond, a, nullptr) != 0 : true;
             out.push_back(u);
+        }
+        static std::string lastUnits;
+        std::string now = std::to_string(actors.size()) + " unit(s): " + std::to_string(out.size()) + " in the world, " + std::to_string(hidden) +
+                          " hidden and " + std::to_string(noTeam) + " with no team skipped (no bar until they are spawned)";
+        if (now != lastUnits) // logged when the counts change, not every second
+        {
+            lastUnits = now;
+            NRN_INFO("units: %s", now.c_str());
         }
         g_units.swap(out);
     }
