@@ -13,7 +13,8 @@
 //   icons, cooldowns and stamina state (NRN_GetAbilitySlots); the game's turn-based ability bar is collapsed meanwhile;
 //   a health bar over every unit for which sBarCondition holds (NorseConditions; default "InFight AND NOT IsDead"),
 //   red for enemies, green for the player's side; a boss bar at the top for a living boss unit (its unit type's
-//   bIsBoss) in the fight; a marker over NorseRealtimeNative's lock-on target.
+//   bIsBoss) in the fight; a marker over NorseRealtimeNative's lock-on target; a compass at the top with the current
+//   quest objective's bearing (2026-11-22, bCompass).
 // Console: nhud.status (settings, hook and unit counts to the log), nhud.set <key> <value> (one NorseHUD.ini key for this
 // session), nhud.reload (reads NorseHUD.ini again).
 // Cost: the unit list, team, boss flag, name and the condition are refreshed once a second; per frame, per shown unit:
@@ -35,7 +36,8 @@ namespace
 {
     struct Config
     {
-        bool Bars = true, BossBar = true, LockMarker = true, AbilityStrip = true;
+        bool Bars = true, BossBar = true, LockMarker = true, AbilityStrip = true, Compass = true;
+        float CompassWidth = 560, CompassTop = 14;
         float StripSize = 64, StripBottom = 70;
         std::wstring BarCondition = L"InFight AND NOT IsDead";
         float BarWidth = 80, BarHeight = 7, BarZ = 115, MaxDistance = 3500;
@@ -68,6 +70,9 @@ namespace
         else if (k == L"bAbilityStrip") g_cfg.AbilityStrip = _wtoi(v.c_str()) != 0;
         else if (k == L"fStripSize") g_cfg.StripSize = std::clamp(static_cast<float>(_wtof(v.c_str())), 32.f, 128.f);
         else if (k == L"fStripBottom") g_cfg.StripBottom = std::clamp(static_cast<float>(_wtof(v.c_str())), 0.f, 600.f);
+        else if (k == L"bCompass") g_cfg.Compass = _wtoi(v.c_str()) != 0;
+        else if (k == L"fCompassWidth") g_cfg.CompassWidth = std::clamp(static_cast<float>(_wtof(v.c_str())), 200.f, 1600.f);
+        else if (k == L"fCompassTop") g_cfg.CompassTop = std::clamp(static_cast<float>(_wtof(v.c_str())), 0.f, 600.f);
         else if (k == L"uLogLevel") g_cfg.LogLevel = _wtoi(v.c_str());
         else if (k == L"sLogDir") g_cfg.LogDir = v;
         else return false;
@@ -510,6 +515,115 @@ namespace
 
     uint64_t g_frames = 0, g_drawn = 0;
 
+    // ------------------------------------------------------------------ the compass (2026-11-22)
+    // The owner, 2026-11-22 05:21: "we need an in-game compass that identifies the location of quest objectives. Just like
+    // Skyrim's compass." A strip at the top centre showing 180 degrees around the camera's heading: N / E / S / W and a tick
+    // every 15 degrees, and a gold marker at the bearing of the current quest objective while it is within that view.
+    // The objective: the mission's AMissionObjectives singleton keeps the current destination as DestinationWaypoint (a
+    // world position) and DestinationMarker (an actor); the game's own WBP_Waypoint arrow belongs to the top-down grid
+    // camera and its stagnation timer, so in real-time play nothing showed where to go. North is world +X (yaw 0), east +Y.
+    UObject* g_objectives = nullptr; // alive-checked via g_objectivesIx before every use
+    int32_t g_objectivesIx = -1;
+    bool g_haveObjective = false;
+    FVec g_objectiveAt{};
+
+    void RefreshObjective()
+    {
+        if (!g_cfg.Compass) return;
+        if (!g_objectives || !Alive(g_objectives, g_objectivesIx))
+        {
+            g_objectives = nullptr;
+            std::vector<UObject*> found;
+            try
+            {
+                RC::Unreal::UObjectGlobals::FindAllOf(L"MissionObjectives", found);
+            }
+            catch (...)
+            {
+            }
+            for (UObject* o : found)
+                if (Alive(o, IndexOf(o)) && o->GetFullName(nullptr).find(L"Default__") == std::wstring::npos)
+                {
+                    g_objectives = o;
+                    g_objectivesIx = IndexOf(o);
+                    break;
+                }
+        }
+        std::string source = "none";
+        FVec at{};
+        if (g_objectives)
+        {
+            auto* wp = Reflect::Get().Prop<FVec>(g_objectives, L"DestinationWaypoint");
+            auto** marker = Reflect::Get().Prop<UObject*>(g_objectives, L"DestinationMarker");
+            if (wp && (wp->X != 0 || wp->Y != 0 || wp->Z != 0))
+            {
+                at = *wp;
+                source = "DestinationWaypoint";
+            }
+            else if (marker && *marker && Alive(*marker, IndexOf(*marker)) && GetVec(*marker, L"K2_GetActorLocation", at))
+                source = "DestinationMarker " + Name(*marker);
+        }
+        g_haveObjective = source != "none";
+        if (g_haveObjective) g_objectiveAt = at;
+        static std::string last;
+        std::string now = !g_objectives ? "no mission objectives in this map"
+                          : g_haveObjective ? "objective at (" + std::to_string(static_cast<int>(at.X)) + ", " + std::to_string(static_cast<int>(at.Y)) + ", " +
+                                                  std::to_string(static_cast<int>(at.Z)) + ") from " + source
+                                            : "mission objectives found (" + Name(g_objectives) + "), no destination set (waypoint zero, no marker)";
+        if (now != last)
+        {
+            last = now;
+            NRN_INFO("COMPASS: %s", now.c_str());
+        }
+    }
+
+    double Wrap180(double a)
+    {
+        a = std::fmod(a + 180.0, 360.0);
+        if (a < 0) a += 360.0;
+        return a - 180.0;
+    }
+
+    void DrawCompass(UObject* hud, int32_t sx)
+    {
+        if (!g_cfg.Compass || !g_objectives || !Alive(g_objectives, g_objectivesIx) || sx <= 0) return;
+        auto** pc = Reflect::Get().Prop<UObject*>(hud, L"PlayerOwner");
+        auto** cam = pc && *pc ? Reflect::Get().Prop<UObject*>(*pc, L"PlayerCameraManager") : nullptr;
+        FRot r{};
+        if (!cam || !*cam || !GetRot(*cam, L"GetCameraRotation", r)) return;
+        const float W = g_cfg.CompassWidth, H = 26, top = g_cfg.CompassTop, cx = sx / 2.f, perDeg = W / 180.f;
+        Rect(hud, {0, 0, 0, 0.45f}, cx - W / 2, top, W, H);
+        Rect(hud, {0.85f, 0.8f, 0.7f, 0.5f}, cx - W / 2, top + H, W, 1);
+        static const wchar_t* kLetters[] = {L"N", L"E", L"S", L"W"};
+        for (int a = 0; a < 360; a += 15)
+        {
+            double rel = Wrap180(a - r.Yaw);
+            if (std::fabs(rel) > 90) continue;
+            float x = cx + static_cast<float>(rel) * perDeg;
+            float fade = 1.f - static_cast<float>(std::fabs(rel)) / 110.f; // dimmer toward the ends, as Skyrim's
+            if (a % 90 == 0)
+                Text(hud, kLetters[a / 90], {0.95f, 0.92f, 0.85f, fade}, x - 5, top + 4, 1.1f);
+            else
+                Rect(hud, {0.85f, 0.8f, 0.7f, 0.7f * fade}, x - 0.5f, top + (a % 45 == 0 ? 8.f : 12.f), 1, a % 45 == 0 ? 12.f : 6.f);
+        }
+        if (g_haveObjective)
+        {
+            FVec from{};
+            if (GetVec(*cam, L"GetCameraLocation", from))
+            {
+                double bearing = std::atan2(g_objectiveAt.Y - from.Y, g_objectiveAt.X - from.X) * 180.0 / 3.14159265358979;
+                double rel = Wrap180(bearing - r.Yaw);
+                if (std::fabs(rel) <= 90)
+                {
+                    float x = cx + static_cast<float>(rel) * perDeg;
+                    Rect(hud, {0, 0, 0, 0.8f}, x - 7, top + 4, 14, 18);
+                    Rect(hud, {0.95f, 0.75f, 0.2f, 1}, x - 5, top + 6, 10, 14);
+                    Rect(hud, {0, 0, 0, 0.8f}, x - 1.5f, top + 10, 3, 6);
+                }
+            }
+        }
+    }
+
     void Draw(UObject* hud)
     {
         int32_t sx = 0, sy = 0;
@@ -524,6 +638,7 @@ namespace
         if (now >= g_nextRefresh)
         {
             Refresh();
+            RefreshObjective();
             g_nextRefresh = now + 1.0;
         }
         ++g_frames;
@@ -570,11 +685,12 @@ namespace
         }
         if (g_cfg.BossBar && boss && sx > 0)
         {
-            float w = sx * 0.4f;
-            Bar(hud, sx / 2.f, 40.f, w, 12.f, static_cast<float>(Health(*boss)) / std::max(1, boss->maxHp), {0.7f, 0.05f, 0.05f, 0.95f});
-            Text(hud, Widen(boss->name), {0.95f, 0.9f, 0.8f, 1}, sx / 2.f - w / 2, 18.f, 1.2f);
+            float w = sx * 0.4f, down = g_cfg.Compass && g_objectives ? g_cfg.CompassTop + 40.f : 0.f; // below the compass when it shows
+            Bar(hud, sx / 2.f, 40.f + down, w, 12.f, static_cast<float>(Health(*boss)) / std::max(1, boss->maxHp), {0.7f, 0.05f, 0.05f, 0.95f});
+            Text(hud, Widen(boss->name), {0.95f, 0.9f, 0.8f, 1}, sx / 2.f - w / 2, 18.f + down, 1.2f);
         }
         DrawStrip(hud, sx, sy, now);
+        DrawCompass(hud, sx);
         if (g_frames == 1 || g_frames % 600 == 0)
             NRN_INFO("drawing: frame %llu, %zu unit(s) known, %llu bar(s) drawn so far%s", static_cast<unsigned long long>(g_frames), g_units.size(),
                      static_cast<unsigned long long>(g_drawn), g_drawOk ? "" : " - DrawRect calls FAILED (see the warnings)");
@@ -715,10 +831,10 @@ namespace
             std::wstring key = Trim(arg.substr(0, sp)), value = sp == std::wstring::npos ? L"" : Trim(arg.substr(sp + 1));
             std::wstring match;
             for (const wchar_t* k : {L"bBars", L"bBossBar", L"bLockMarker", L"sBarCondition", L"fBarWidth", L"fBarHeight", L"fBarZ", L"fMaxDistance", L"bAbilityStrip",
-                                       L"fStripSize", L"fStripBottom", L"uLogLevel"})
+                                       L"fStripSize", L"fStripBottom", L"bCompass", L"fCompassWidth", L"fCompassTop", L"uLogLevel"})
                 if (_wcsicmp(k, key.c_str()) == 0) match = k;
             if (match.empty() || value.empty())
-                NRN_WARN("nhud.set: use nhud.set <key> <value>, key one of bBars bBossBar bLockMarker sBarCondition fBarWidth fBarHeight fBarZ fMaxDistance bAbilityStrip fStripSize fStripBottom uLogLevel");
+                NRN_WARN("nhud.set: use nhud.set <key> <value>, key one of bBars bBossBar bLockMarker sBarCondition fBarWidth fBarHeight fBarZ fMaxDistance bAbilityStrip fStripSize fStripBottom bCompass fCompassWidth fCompassTop uLogLevel");
             else
             {
                 ApplyKey(match, value);
