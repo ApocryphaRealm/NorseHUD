@@ -764,10 +764,16 @@ namespace
                     double bearing = std::atan2(t.Y - from.Y, t.X - from.X) * 180.0 / 3.14159265358979;
                     double rel = Wrap180(bearing - r.Yaw);
                     if (std::fabs(rel) > 90) continue;
+                    // the owner, 05:47: "the compass still isn't showing me where I'm supposed to go" - the first 10 px
+                    // marker was drawn but too small to notice: a larger gold marker overhanging the strip, and the distance
                     float x = cx + static_cast<float>(rel) * perDeg;
-                    Rect(hud, {0, 0, 0, 0.8f}, x - 7, top + 4, 14, 18);
-                    Rect(hud, {0.95f, 0.75f, 0.2f, 1}, x - 5, top + 6, 10, 14);
-                    Rect(hud, {0, 0, 0, 0.8f}, x - 1.5f, top + 10, 3, 6);
+                    Rect(hud, {0, 0, 0, 0.85f}, x - 10, top - 4, 20, H + 8);
+                    Rect(hud, {1.0f, 0.78f, 0.18f, 1}, x - 8, top - 2, 16, H + 4);
+                    Rect(hud, {0.25f, 0.15f, 0.02f, 1}, x - 3, top + 5, 6, H - 10);
+                    double dx = t.X - from.X, dy = t.Y - from.Y;
+                    int metres = static_cast<int>(std::sqrt(dx * dx + dy * dy) / 100.0 + 0.5);
+                    std::wstring d = std::to_wstring(metres) + L" m";
+                    Text(hud, d, {1.0f, 0.85f, 0.4f, 1}, x - 4.f * static_cast<float>(d.size()), top + H + 6, 1.0f);
                 }
         }
     }
