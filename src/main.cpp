@@ -24,6 +24,7 @@
 
 #include <MinHook.h>
 
+#include <climits>
 #include <cmath>
 #include <map>
 
@@ -527,6 +528,91 @@ namespace
     bool g_haveObjective = false;
     FVec g_objectiveAt{};
 
+    // KismetSystemLibrary::Conv_SoftObjectReferenceToObject(TSoftObjectPtr<UObject> @0 (40 bytes)) -> UObject* @40
+    UObject* FromSoft(const uint8_t* soft)
+    {
+        static UObject* ksl = nullptr; // lives-forever (Default__KismetSystemLibrary)
+        if (!ksl) ksl = RC::Unreal::UObjectGlobals::StaticFindObject_InternalSlow(nullptr, nullptr, L"/Script/Engine.Default__KismetSystemLibrary", false);
+        if (!ksl) return nullptr;
+        static bool sizeOk = Reflect::Get().ParmsSizeOf(ksl, L"Conv_SoftObjectReferenceToObject") == 48;
+        if (!sizeOk) return nullptr;
+        Buf p;
+        std::memcpy(p.b, soft, 40);
+        if (!Reflect::Get().Call(ksl, L"Conv_SoftObjectReferenceToObject", p.b, 48, sizeof(p.b))) return nullptr;
+        UObject* o = nullptr;
+        std::memcpy(&o, p.b + 40, 8);
+        return o && Alive(o, IndexOf(o)) ? o : nullptr;
+    }
+
+    // AMissionObjectives::Objectives - TMap<FName, FMissionObjective> - read by hand (the layout NorseReflect's Rows() reads,
+    // with a 0x170-byte value): element = key FName @0, FMissionObjective @8 (ID @0, MissionObjectives* @8, Hidden @0x8A,
+    // Destination soft @0x90, DestinationPriority @0xB8, DestinationMarker soft @0xC0, Active @0x118, Result @0x119), then
+    // the hash ids - 0x180 bytes. Each element is checked (its ID equals its key and it points back at this actor) before
+    // anything in it is used. Returns the destination (its marker if it has one) of the active, shown objective with the
+    // highest DestinationPriority, and logs the objective list when it changes.
+    UObject* ActiveObjectiveDestination(UObject* objectives)
+    {
+        auto* h = Reflect::Get().Prop<uint8_t>(objectives, L"Objectives");
+        if (!h) return nullptr;
+        struct SparseHead
+        {
+            uint8_t* data;
+            int32_t num, max;
+            uint32_t inl[4];
+            uint32_t* secondary;
+            int32_t numBits, maxBits;
+            int32_t firstFree, numFree;
+        };
+        auto* s = reinterpret_cast<SparseHead*>(h);
+        static std::string lastList;
+        if (s->num < 0 || s->num > 512 || s->num > s->max || (s->num && !s->data) || s->numFree < 0 || s->numFree > s->num)
+        {
+            if (lastList != "bad") NRN_WARN("COMPASS: the Objectives map does not look like a TMap (num %d) - left alone", s->num);
+            lastList = "bad";
+            return nullptr;
+        }
+        const uint32_t* bits = s->secondary ? s->secondary : s->inl;
+        UObject* best = nullptr;
+        int bestPrio = INT_MIN;
+        std::string list;
+        for (int32_t i = 0; i < s->num; ++i)
+        {
+            if (s->numFree && !(bits[i >> 5] & (1u << (i & 31)))) continue;
+            uint8_t* el = s->data + static_cast<size_t>(i) * 0x180;
+            uint8_t* obj = el + 8;
+            UObject* owner = nullptr;
+            std::memcpy(&owner, obj + 8, 8);
+            if (std::memcmp(el, obj, 8) != 0 || owner != objectives)
+            {
+                if (lastList != "layout") NRN_WARN("COMPASS: objective %d does not match the expected layout (ID vs key, owner) - map left alone", i);
+                lastList = "layout";
+                return nullptr;
+            }
+            uint64_t key = 0;
+            std::memcpy(&key, el, 8);
+            bool hidden = obj[0x8A] != 0, active = obj[0x118] != 0;
+            uint8_t result = obj[0x119];
+            int32_t prio = 0;
+            std::memcpy(&prio, obj + 0xB8, 4);
+            UObject* dest = active && !hidden ? FromSoft(obj + 0x90) : nullptr;
+            UObject* mark = active && !hidden ? FromSoft(obj + 0xC0) : nullptr;
+            UObject* use = mark ? mark : dest;
+            list += " " + Narrow(NameText(key)) + "[" + (active ? "active" : "-") + (hidden ? ",hidden" : "") + ",result " + std::to_string(result) +
+                    (use ? ", -> " + Name(use) : "") + "]";
+            if (use && prio > bestPrio)
+            {
+                best = use;
+                bestPrio = prio;
+            }
+        }
+        if (list != lastList)
+        {
+            lastList = list;
+            NRN_INFO("COMPASS: %d objective(s):%s", s->num - s->numFree, list.c_str());
+        }
+        return best;
+    }
+
     void RefreshObjective()
     {
         if (!g_cfg.Compass) return;
@@ -562,6 +648,10 @@ namespace
             }
             else if (marker && *marker && Alive(*marker, IndexOf(*marker)) && GetVec(*marker, L"K2_GetActorLocation", at))
                 source = "DestinationMarker " + Name(*marker);
+            else if (UObject* dest = ActiveObjectiveDestination(g_objectives)) // first test: "Speak with the Homestead Owner" set neither
+            {
+                if (GetVec(dest, L"K2_GetActorLocation", at)) source = "the active objective's Destination " + Name(dest);
+            }
         }
         g_haveObjective = source != "none";
         if (g_haveObjective) g_objectiveAt = at;
