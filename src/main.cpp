@@ -613,6 +613,58 @@ namespace
         return best;
     }
 
+    // UObjectBase (UE5): vtable @0, flags @8, index @0xC, ClassPrivate @0x10, NamePrivate @0x18, OuterPrivate @0x20. The
+    // ABI header declares no outer accessor, so the outer is read at 0x20 - only after the class pointer is checked at 0x10.
+    UObject* OuterOf(UObject* o)
+    {
+        if (!o) return nullptr;
+        auto* b = reinterpret_cast<uint8_t*>(o);
+        UObject* cls = nullptr;
+        std::memcpy(&cls, b + 0x10, 8);
+        if (cls != reinterpret_cast<UObject*>(Reflect::Get().ClassOf(o))) return nullptr;
+        UObject* outer = nullptr;
+        std::memcpy(&outer, b + 0x20, 8);
+        return outer && Alive(outer, IndexOf(outer)) ? outer : nullptr;
+    }
+
+    std::vector<FVec> g_talkTargets;
+
+    // Every Activity_Dialogue in the map whose interactable (the first InteractableComponent in its outer chain) is not
+    // Completed: the interactable's actor location. Returns the source text for the log, or "none".
+    std::string DialogueTargets(std::vector<FVec>& out)
+    {
+        std::vector<UObject*> dlg;
+        try
+        {
+            RC::Unreal::UObjectGlobals::FindAllOf(L"Activity_Dialogue", dlg);
+        }
+        catch (...)
+        {
+        }
+        std::string names;
+        for (UObject* d : dlg)
+        {
+            if (!d || !Alive(d, IndexOf(d)) || d->GetFullName(nullptr).find(L"Default__") != std::wstring::npos) continue;
+            UObject* comp = nullptr;
+            for (UObject* o = OuterOf(d); o; o = OuterOf(o))
+            {
+                UObject* cls = reinterpret_cast<UObject*>(Reflect::Get().ClassOf(o));
+                if (cls && Name(cls).find("InteractableComponent") != std::string::npos)
+                {
+                    comp = o;
+                    break;
+                }
+            }
+            if (!comp || FieldTrue(comp, L"Completed")) continue;
+            UObject* actor = OuterOf(comp);
+            FVec at{};
+            if (!actor || !GetVec(actor, L"K2_GetActorLocation", at) || (at.X == 0 && at.Y == 0 && at.Z == 0)) continue;
+            out.push_back(at);
+            names += (names.empty() ? "" : ", ") + Name(actor);
+        }
+        return out.empty() ? "none" : "dialogue waiting at " + names;
+    }
+
     void RefreshObjective()
     {
         if (!g_cfg.Compass) return;
@@ -653,12 +705,19 @@ namespace
                 if (GetVec(dest, L"K2_GetActorLocation", at)) source = "the active objective's Destination " + Name(dest);
             }
         }
-        g_haveObjective = source != "none";
-        if (g_haveObjective) g_objectiveAt = at;
+        // Second test (SeasideSkirmish, probes objective_setters / activity_owners): "Speak with the Village Chief" has no
+        // Destination and no condition - an interactable (InteractableVolume_1) holds the chief's Activity_Dialogue and the
+        // StartCombat that completes it. So, when the mission names no place: every interactable still waiting with a
+        // dialogue is a target, as Skyrim marks the person to talk to; using it (Completed) takes its marker away.
+        g_talkTargets.clear();
+        if (g_objectives && source == "none") source = DialogueTargets(g_talkTargets);
+        else if (source != "none") g_talkTargets.push_back(at); // one marker list, whatever the source
+        g_haveObjective = !g_talkTargets.empty();
+        if (g_haveObjective) at = g_talkTargets.front();
         static std::string last;
         std::string now = !g_objectives ? "no mission objectives in this map"
-                          : g_haveObjective ? "objective at (" + std::to_string(static_cast<int>(at.X)) + ", " + std::to_string(static_cast<int>(at.Y)) + ", " +
-                                                  std::to_string(static_cast<int>(at.Z)) + ") from " + source
+                          : g_haveObjective ? std::to_string(g_talkTargets.size()) + " marker(s), first at (" + std::to_string(static_cast<int>(at.X)) + ", " +
+                                                  std::to_string(static_cast<int>(at.Y)) + ", " + std::to_string(static_cast<int>(at.Z)) + ") from " + source
                                             : "mission objectives found (" + Name(g_objectives) + "), no destination set (waypoint zero, no marker)";
         if (now != last)
         {
@@ -700,17 +759,16 @@ namespace
         {
             FVec from{};
             if (GetVec(*cam, L"GetCameraLocation", from))
-            {
-                double bearing = std::atan2(g_objectiveAt.Y - from.Y, g_objectiveAt.X - from.X) * 180.0 / 3.14159265358979;
-                double rel = Wrap180(bearing - r.Yaw);
-                if (std::fabs(rel) <= 90)
+                for (const FVec& t : g_talkTargets)
                 {
+                    double bearing = std::atan2(t.Y - from.Y, t.X - from.X) * 180.0 / 3.14159265358979;
+                    double rel = Wrap180(bearing - r.Yaw);
+                    if (std::fabs(rel) > 90) continue;
                     float x = cx + static_cast<float>(rel) * perDeg;
                     Rect(hud, {0, 0, 0, 0.8f}, x - 7, top + 4, 14, 18);
                     Rect(hud, {0.95f, 0.75f, 0.2f, 1}, x - 5, top + 6, 10, 14);
                     Rect(hud, {0, 0, 0, 0.8f}, x - 1.5f, top + 10, 3, 6);
                 }
-            }
         }
     }
 
